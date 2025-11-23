@@ -1,10 +1,11 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { Activity, RefreshCw, Filter, ArrowUp, ArrowDown, Search, Zap, AlertTriangle, Loader2, Database } from 'lucide-react';
 import { StockData, StrategyType } from './types';
-import { fetchStocks, fetchMockStocks } from './services/stockService';
+import { fetchStocks, fetchMockStocks, fetchStocksPaginated } from './services/stockService';
 import { checkStrategy } from './services/strategyService';
 import StockList from './components/StockList';
 import CandleStickChart from './components/CandleStickChart';
+import PaginationControls from './components/PaginationControls';
 
 export default function App() {
   const [activeStrategy, setActiveStrategy] = useState<StrategyType>(StrategyType.ALL);
@@ -15,27 +16,56 @@ export default function App() {
   const [error, setError] = useState<string | null>(null);
   const [isDemoMode, setIsDemoMode] = useState<boolean>(false);
 
-  const loadData = async (useMock: boolean = false) => {
+  // 分頁狀態
+  const [usePagination, setUsePagination] = useState<boolean>(true);
+  const [currentPage, setCurrentPage] = useState<number>(0);
+  const [totalStocks, setTotalStocks] = useState<number>(0);
+  const [itemsPerPage] = useState<number>(100);
+
+  // 搜尋狀態
+  const [searchQuery, setSearchQuery] = useState<string>('');
+  const [searchInput, setSearchInput] = useState<string>('');
+
+  const loadData = async (useMock: boolean = false, page: number = 0, search: string = '') => {
     setLoading(true);
     setError(null);
     try {
       let data: StockData[];
+      let total = 0;
 
       if (useMock) {
+        // 模擬模式使用原有邏輯
         data = await fetchMockStocks();
         setIsDemoMode(true);
+        setUsePagination(false);
+        total = data.length;
+      } else if (usePagination) {
+        // 分頁模式
+        const response = await fetchStocksPaginated({
+          offset: page * itemsPerPage,
+          limit: itemsPerPage,
+          search: search,
+          sort: 'symbol',
+          order: 'asc'
+        });
+        data = response.data;
+        total = response.total;
+        setIsDemoMode(false);
       } else {
+        // 舊模式（向下相容）
         data = await fetchStocks();
         setIsDemoMode(false);
+        total = data.length;
       }
 
       setStocks(data);
+      setTotalStocks(total);
       setLastUpdated(new Date());
 
       // Update selection logic
       if (data.length > 0) {
-        if (!selectedStock) {
-          // Select first if nothing selected
+        if (!selectedStock || page !== currentPage || search !== searchQuery) {
+          // Select first if nothing selected or changed page/search
           setSelectedStock(data[0]);
         } else {
           // Try to keep current selection updated
@@ -50,6 +80,7 @@ export default function App() {
     } catch (err) {
       console.error(err);
       setError("無法連接後端伺服器。請確保您已執行 'python server.py' 並且 yfinance 運作正常。");
+      setUsePagination(false); // 錯誤時回退到舊模式
     } finally {
       setLoading(false);
     }
@@ -57,8 +88,8 @@ export default function App() {
 
   // Initial Load
   useEffect(() => {
-    loadData();
-  }, []);
+    loadData(isDemoMode, currentPage, searchQuery);
+  }, [currentPage, searchQuery]);
 
   // Filtering Logic
   const filteredStocks = useMemo(() => {
@@ -67,11 +98,29 @@ export default function App() {
   }, [activeStrategy, stocks]);
 
   const handleRefresh = () => {
-    loadData(isDemoMode);
+    loadData(isDemoMode, currentPage, searchQuery);
   };
 
   const handleSwitchToDemo = () => {
-    loadData(true);
+    setCurrentPage(0);
+    setSearchQuery('');
+    setSearchInput('');
+    loadData(true, 0, '');
+  };
+
+  const handlePageChange = (page: number) => {
+    setCurrentPage(page);
+  };
+
+  const handleSearch = () => {
+    setCurrentPage(0); // 搜尋時重置到第一頁
+    setSearchQuery(searchInput);
+  };
+
+  const handleSearchClear = () => {
+    setSearchInput('');
+    setSearchQuery('');
+    setCurrentPage(0);
   };
 
   return (
@@ -136,6 +185,44 @@ export default function App() {
           {/* Sidebar: Strategy & List */}
           <aside className="lg:col-span-4 flex flex-col gap-4">
 
+            {/* Search Panel */}
+            {usePagination && (
+              <div className="bg-slate-900 p-4 rounded-xl border border-slate-800 shadow-sm">
+                <div className="flex gap-2">
+                  <div className="flex-1 relative">
+                    <input
+                      type="text"
+                      value={searchInput}
+                      onChange={(e) => setSearchInput(e.target.value)}
+                      onKeyDown={(e) => e.key === 'Enter' && handleSearch()}
+                      placeholder="搜尋股票代碼... (例如: 50)"
+                      className="w-full px-4 py-2 bg-slate-800 text-slate-200 rounded-lg border border-slate-700 focus:border-blue-500 focus:outline-none text-sm"
+                    />
+                    <Search className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-500" size={16} />
+                  </div>
+                  <button
+                    onClick={handleSearch}
+                    className="px-4 py-2 bg-blue-600 hover:bg-blue-500 text-white rounded-lg text-sm font-medium transition-all"
+                  >
+                    搜尋
+                  </button>
+                  {searchQuery && (
+                    <button
+                      onClick={handleSearchClear}
+                      className="px-4 py-2 bg-slate-700 hover:bg-slate-600 text-white rounded-lg text-sm font-medium transition-all"
+                    >
+                      清除
+                    </button>
+                  )}
+                </div>
+                {searchQuery && (
+                  <div className="mt-2 text-xs text-slate-400">
+                    搜尋: <span className="text-blue-400 font-medium">「{searchQuery}」</span>
+                  </div>
+                )}
+              </div>
+            )}
+
             {/* Strategy Selector Panel */}
             <div className="bg-slate-900 p-5 rounded-xl border border-slate-800 shadow-sm">
               <h3 className="text-xs font-bold text-slate-500 mb-4 uppercase tracking-widest flex items-center gap-2">
@@ -145,8 +232,8 @@ export default function App() {
                 <button
                   onClick={() => setActiveStrategy(StrategyType.ALL)}
                   className={`p-3 rounded-lg text-sm font-medium transition-all border ${activeStrategy === StrategyType.ALL
-                      ? 'bg-blue-600 text-white border-blue-500 shadow-lg shadow-blue-900/40'
-                      : 'bg-slate-800 text-slate-400 border-slate-700 hover:bg-slate-750'
+                    ? 'bg-blue-600 text-white border-blue-500 shadow-lg shadow-blue-900/40'
+                    : 'bg-slate-800 text-slate-400 border-slate-700 hover:bg-slate-750'
                     }`}
                 >
                   全部股票
@@ -154,8 +241,8 @@ export default function App() {
                 <button
                   onClick={() => setActiveStrategy(StrategyType.FIRST_RED_K)}
                   className={`p-3 rounded-lg text-sm font-medium transition-all border flex flex-col items-center justify-center gap-1 ${activeStrategy === StrategyType.FIRST_RED_K
-                      ? 'bg-red-600 text-white border-red-500 shadow-lg shadow-red-900/40'
-                      : 'bg-slate-800 text-slate-400 border-slate-700 hover:bg-slate-750'
+                    ? 'bg-red-600 text-white border-red-500 shadow-lg shadow-red-900/40'
+                    : 'bg-slate-800 text-slate-400 border-slate-700 hover:bg-slate-750'
                     }`}
                 >
                   <span className="flex items-center gap-1"><Zap size={14} fill="currentColor" /> 第一根紅K</span>
@@ -167,7 +254,7 @@ export default function App() {
             <div className="bg-slate-900 p-5 rounded-xl border border-slate-800 flex-1 shadow-sm min-h-[400px]">
               <div className="flex justify-between items-center mb-4 pb-2 border-b border-slate-800/50">
                 <h3 className="text-xs font-bold text-slate-500 uppercase tracking-widest">
-                  Market Watch ({filteredStocks.length})
+                  Market Watch ({filteredStocks.length}{usePagination && totalStocks > 0 ? ` / ${totalStocks}` : ''})
                 </h3>
                 <Search size={16} className="text-slate-600" />
               </div>
@@ -183,6 +270,18 @@ export default function App() {
                   selectedId={selectedStock?.symbol}
                   onSelect={setSelectedStock}
                   isFiltered={activeStrategy !== StrategyType.ALL}
+                />
+              )}
+
+              {/* Pagination Controls */}
+              {usePagination && !loading && totalStocks > itemsPerPage && (
+                <PaginationControls
+                  currentPage={currentPage}
+                  totalPages={Math.ceil(totalStocks / itemsPerPage)}
+                  onPageChange={handlePageChange}
+                  totalItems={totalStocks}
+                  itemsPerPage={itemsPerPage}
+                  displayedItems={filteredStocks.length}
                 />
               )}
             </div>
