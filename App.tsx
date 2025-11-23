@@ -26,7 +26,7 @@ export default function App() {
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [searchInput, setSearchInput] = useState<string>('');
 
-  const loadData = async (useMock: boolean = false, page: number = 0, search: string = '') => {
+  const loadData = async (useMock: boolean = false, page: number = 0, search: string = '', strategy: StrategyType = StrategyType.ALL) => {
     setLoading(true);
     setError(null);
     try {
@@ -39,12 +39,20 @@ export default function App() {
         setIsDemoMode(true);
         setUsePagination(false);
         total = data.length;
+
+        // Client-side filtering for mock mode
+        if (strategy !== StrategyType.ALL) {
+          data = data.filter(stock => checkStrategy(strategy, stock.history));
+          total = data.length;
+        }
+
       } else if (usePagination) {
-        // 分頁模式
+        // 分頁模式 (Server-side filtering)
         const response = await fetchStocksPaginated({
           offset: page * itemsPerPage,
           limit: itemsPerPage,
           search: search,
+          strategy: strategy,
           sort: 'symbol',
           order: 'asc'
         });
@@ -56,6 +64,12 @@ export default function App() {
         data = await fetchStocks();
         setIsDemoMode(false);
         total = data.length;
+
+        // Client-side filtering for legacy mode
+        if (strategy !== StrategyType.ALL) {
+          data = data.filter(stock => checkStrategy(strategy, stock.history));
+          total = data.length;
+        }
       }
 
       setStocks(data);
@@ -64,8 +78,8 @@ export default function App() {
 
       // Update selection logic
       if (data.length > 0) {
-        if (!selectedStock || page !== currentPage || search !== searchQuery) {
-          // Select first if nothing selected or changed page/search
+        if (!selectedStock || page !== currentPage || search !== searchQuery || strategy !== activeStrategy) {
+          // Select first if nothing selected or changed page/search/strategy
           setSelectedStock(data[0]);
         } else {
           // Try to keep current selection updated
@@ -76,6 +90,8 @@ export default function App() {
             setSelectedStock(data[0]);
           }
         }
+      } else {
+        setSelectedStock(null);
       }
     } catch (err) {
       console.error(err);
@@ -86,30 +102,34 @@ export default function App() {
     }
   };
 
-  // Initial Load
+  // Initial Load & Strategy Change
   useEffect(() => {
-    loadData(isDemoMode, currentPage, searchQuery);
-  }, [currentPage, searchQuery]);
+    loadData(isDemoMode, currentPage, searchQuery, activeStrategy);
+  }, [currentPage, searchQuery, activeStrategy]);
 
-  // Filtering Logic
-  const filteredStocks = useMemo(() => {
-    if (activeStrategy === StrategyType.ALL) return stocks;
-    return stocks.filter(stock => checkStrategy(activeStrategy, stock.history));
-  }, [activeStrategy, stocks]);
+  // Filtering Logic - REMOVED (Now handled by server or loadData)
+  // const filteredStocks = ...
 
   const handleRefresh = () => {
-    loadData(isDemoMode, currentPage, searchQuery);
+    loadData(isDemoMode, currentPage, searchQuery, activeStrategy);
   };
 
   const handleSwitchToDemo = () => {
     setCurrentPage(0);
     setSearchQuery('');
     setSearchInput('');
-    loadData(true, 0, '');
+    setActiveStrategy(StrategyType.ALL);
+    loadData(true, 0, '', StrategyType.ALL);
   };
 
   const handlePageChange = (page: number) => {
     setCurrentPage(page);
+  };
+
+  const handleStrategyChange = (strategy: StrategyType) => {
+    if (strategy === activeStrategy) return;
+    setActiveStrategy(strategy);
+    setCurrentPage(0); // Reset to first page when changing strategy
   };
 
   const handleSearch = () => {
@@ -230,7 +250,7 @@ export default function App() {
               </h3>
               <div className="grid grid-cols-2 gap-3">
                 <button
-                  onClick={() => setActiveStrategy(StrategyType.ALL)}
+                  onClick={() => handleStrategyChange(StrategyType.ALL)}
                   className={`p-3 rounded-lg text-sm font-medium transition-all border ${activeStrategy === StrategyType.ALL
                     ? 'bg-blue-600 text-white border-blue-500 shadow-lg shadow-blue-900/40'
                     : 'bg-slate-800 text-slate-400 border-slate-700 hover:bg-slate-750'
@@ -239,7 +259,7 @@ export default function App() {
                   全部股票
                 </button>
                 <button
-                  onClick={() => setActiveStrategy(StrategyType.FIRST_RED_K)}
+                  onClick={() => handleStrategyChange(StrategyType.FIRST_RED_K)}
                   className={`p-3 rounded-lg text-sm font-medium transition-all border flex flex-col items-center justify-center gap-1 ${activeStrategy === StrategyType.FIRST_RED_K
                     ? 'bg-red-600 text-white border-red-500 shadow-lg shadow-red-900/40'
                     : 'bg-slate-800 text-slate-400 border-slate-700 hover:bg-slate-750'
@@ -254,7 +274,7 @@ export default function App() {
             <div className="bg-slate-900 p-5 rounded-xl border border-slate-800 flex-1 shadow-sm min-h-[400px]">
               <div className="flex justify-between items-center mb-4 pb-2 border-b border-slate-800/50">
                 <h3 className="text-xs font-bold text-slate-500 uppercase tracking-widest">
-                  Market Watch ({filteredStocks.length}{usePagination && totalStocks > 0 ? ` / ${totalStocks}` : ''})
+                  Market Watch ({stocks.length}{usePagination && totalStocks > 0 ? ` / ${totalStocks}` : ''})
                 </h3>
                 <Search size={16} className="text-slate-600" />
               </div>
@@ -263,10 +283,13 @@ export default function App() {
                 <div className="flex flex-col items-center justify-center h-64 text-slate-500 gap-3">
                   <Loader2 size={32} className="animate-spin text-blue-500" />
                   <p>正在獲取數據...</p>
+                  {activeStrategy !== StrategyType.ALL && (
+                    <p className="text-xs text-slate-600">策略篩選可能需要較長時間...</p>
+                  )}
                 </div>
               ) : (
                 <StockList
-                  stocks={filteredStocks}
+                  stocks={stocks}
                   selectedId={selectedStock?.symbol}
                   onSelect={setSelectedStock}
                   isFiltered={activeStrategy !== StrategyType.ALL}
@@ -281,7 +304,7 @@ export default function App() {
                   onPageChange={handlePageChange}
                   totalItems={totalStocks}
                   itemsPerPage={itemsPerPage}
-                  displayedItems={filteredStocks.length}
+                  displayedItems={stocks.length}
                 />
               )}
             </div>

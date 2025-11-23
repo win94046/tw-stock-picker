@@ -16,6 +16,7 @@ export interface PaginationParams {
   offset?: number;
   limit?: number;
   search?: string;
+  strategy?: string;
   sort?: 'symbol';
   order?: 'asc' | 'desc';
 }
@@ -48,7 +49,7 @@ export const fetchStocksPaginated = async (
   params: PaginationParams = {}
 ): Promise<PaginatedResponse> => {
   try {
-    const { offset = 0, limit = 100, search = '', sort = 'symbol', order = 'asc' } = params;
+    const { offset = 0, limit = 100, search = '', strategy = '', sort = 'symbol', order = 'asc' } = params;
 
     // 構建查詢參數
     const queryParams = new URLSearchParams({
@@ -63,11 +64,16 @@ export const fetchStocksPaginated = async (
       queryParams.append('search', search.trim());
     }
 
+    // 如果有策略，加入參數
+    if (strategy && strategy !== 'all') {
+      queryParams.append('strategy', strategy);
+    }
+
     const url = `${API_URL_PAGINATED}?${queryParams.toString()}`;
 
-    // 使用較長的超時時間（100支股票需要更多時間）
+    // 使用較長的超時時間（100支股票需要更多時間，策略篩選可能需要更久）
     const controller = new AbortController();
-    const id = setTimeout(() => controller.abort(), 15000); // 15 seconds timeout
+    const id = setTimeout(() => controller.abort(), 30000); // 30 seconds timeout
 
     const response = await fetch(url, { signal: controller.signal });
     clearTimeout(id);

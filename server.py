@@ -68,6 +68,48 @@ def filter_stocks_by_search(stocks: List[Dict], search_query: str) -> List[Dict]
     
     return filtered
 
+# 策略: 第一根紅K
+def check_first_red_k(history: List[Dict]) -> bool:
+    """
+    檢查是否符合「第一根紅K」策略
+    條件:
+    1. 實體紅K (收>開) 且 幅度 > 2%
+    2. 昨日是黑K或下跌 (確認是轉折)
+    3. 量能放大 (> 5日均量 1.5倍)
+    """
+    if len(history) < 6:
+        return False
+        
+    today = history[-1]
+    yesterday = history[-2]
+    
+    # 1. 檢查型態: 紅K (收>開) 且 實體 > 2%
+    if today['open'] == 0: return False
+    body_pct = (today['close'] - today['open']) / today['open']
+    is_strong_red_k = body_pct > 0.02
+    
+    if not is_strong_red_k:
+        return False
+        
+    # 2. 檢查趨勢: 昨天弱勢 (黑K 或 下跌)
+    # 昨天收 < 開 (黑K) 或 昨天收 < 前天收 (下跌)
+    prev_day = history[-3]
+    was_weak_yesterday = yesterday['close'] < yesterday['open'] or yesterday['close'] < prev_day['close']
+    
+    if not was_weak_yesterday:
+        return False
+        
+    # 3. 檢查量能: > 1.5倍 5日均量
+    # 取前5天 (不含今天)
+    past_5_days = history[-6:-1]
+    avg_volume = sum(d['volume'] for d in past_5_days) / 5
+    
+    if avg_volume == 0: return False
+    
+    is_volume_spike = today['volume'] > (avg_volume * 1.5)
+    
+    return is_volume_spike
+
 # 5. 批次下載股票數據
 def download_stock_batch(symbols: List[str], use_cache: bool = True):
     """批次下載股票數據，支援快取"""
@@ -82,113 +124,137 @@ def download_stock_batch(symbols: List[str], use_cache: bool = True):
     
     # 下載數據
     print(f"Downloading data for {len(symbols)} stocks...")
-    data = yf.download(symbols, period="3mo", group_by='ticker', threads=True)
-    
-    # 更新快取
-    _cache[cache_key] = data
-    _cache_timestamp[cache_key] = datetime.now()
-    
-    return data
+    try:
+        data = yf.download(symbols, period="3mo", group_by='ticker', threads=True)
+        
+        # 更新快取
+        _cache[cache_key] = data
+        _cache_timestamp[cache_key] = datetime.now()
+        
+        return data
+    except Exception as e:
+        print(f"Download error: {e}")
+        return pd.DataFrame()
 
 # 6. 處理股票數據
 def process_stock_data(stock_info: Dict, data) -> Optional[Dict]:
-    """處理單一股票的數據"""
     symbol = stock_info["id"]
     name = stock_info["name"]
     
     try:
         # 取得單一股票的 DataFrame
-        if len(ALL_STOCKS) == 1:
-            df = data
+        if isinstance(data, pd.DataFrame) and data.empty:
+            return None
+            
+        if len(ALL_STOCKS) == 1 or (isinstance(data.columns, pd.MultiIndex) and len(data.columns.levels[0]) == 1):
+             df = data
         else:
             if symbol not in data.columns.levels[0]:
                 return None
             df = data[symbol]
         
-        if df.empty:
-            return None
-
-        # 轉換歷史數據 (OHLCV)
+        # 處理 NaN
+        df = df.ffill().bfill()
+        
+        # 轉換歷史數據
         history = []
         for index, row in df.iterrows():
-            record = {
-                "date": index.strftime('%Y-%m-%d'),
-                "open": clean_float(row.get('Open', 0)),
-                "high": clean_float(row.get('High', 0)),
-                "low": clean_float(row.get('Low', 0)),
-                "close": clean_float(row.get('Close', 0)),
-                "volume": clean_float(row.get('Volume', 0))
-            }
-            history.append(record)
-        
-        # 計算漲跌幅與現價
-        if len(history) >= 2:
-            last_day = history[-1]
-            prev_day = history[-2]
-            current_price = last_day['close']
+            try:
+                # 確保數值有效
+                if pd.isna(row['Open']) or pd.isna(row['Close']):
+                    continue
+                    
+                history.append({
+                    "date": index.strftime('%Y-%m-%d'),
+                    "open": float(row['Open']),
+                    "high": float(row['High']),
+                    "low": float(row['Low']),
+                    "close": float(row['Close']),
+                    "volume": int(row['Volume'])
+                })
+            except Exception as e:
+                continue
+                
+        if not history:
+            return None
             
-            prev_close = prev_day['close'] if prev_day['close'] != 0 else 1
-            change_pct = ((current_price - prev_close) / prev_close) * 100
-        else:
-            current_price = history[-1]['close'] if history else 0
-            change_pct = 0.0
-
-        display_symbol = symbol.replace('.TW', '')
-
+        # 計算漲跌幅
+        last_day = history[-1]
+        prev_day = history[-2] if len(history) > 1 else last_day
+        change_pct = ((last_day['close'] - prev_day['close']) / prev_day['close']) * 100
+        
         return {
-            "symbol": display_symbol,
+            "symbol": symbol,
             "name": name,
-            "currentPrice": current_price,
+            "currentPrice": last_day['close'],
             "changePct": change_pct,
             "history": history
         }
         
     except Exception as e:
-        print(f"Error processing {symbol}: {e}")
+        # print(f"Error processing {symbol}: {e}")
         return None
 
 # 7. 原有端點（向下相容）
 @app.get("/api/stocks")
 def get_stocks():
-    """原有端點，返回前5支股票（向下相容）"""
-    # 使用前5支股票
-    stock_subset = ALL_STOCKS[:5]
-    tickers = [s["id"] for s in stock_subset]
+    """
+    獲取所有股票數據（舊版 API，僅回傳前 100 檔）
+    """
+    # 為了保持相容性，這裡只回傳前 100 檔
+    target_stocks = ALL_STOCKS[:100]
+    tickers = [s["id"] for s in target_stocks]
     
     data = download_stock_batch(tickers)
     
     results = []
-    for stock_info in stock_subset:
+    for stock_info in target_stocks:
         result = process_stock_data(stock_info, data)
         if result:
             results.append(result)
-
+            
     return results
 
-# 8. 新增分頁端點
+# 8. 新的分頁端點
 @app.get("/api/stocks/paginated")
 def get_stocks_paginated(
     offset: int = Query(0, ge=0, description="起始位置"),
     limit: int = Query(100, ge=1, le=200, description="每頁數量"),
     search: Optional[str] = Query(None, description="搜尋股票代碼"),
+    strategy: Optional[str] = Query(None, description="策略篩選 (例如: first_red_k)"),
     sort: str = Query("symbol", description="排序方式"),
     order: str = Query("asc", description="排序順序 (asc/desc)")
 ):
     """
-    分頁獲取股票資料，支援搜尋和排序
-    
-    參數:
-    - offset: 起始位置（預設0）
-    - limit: 每頁數量（預設100，最大200）
-    - search: 搜尋關鍵字（模糊搜尋股票代碼）
-    - sort: 排序方式（symbol）
-    - order: 排序順序（asc/desc）
+    分頁獲取股票資料，支援搜尋、策略篩選和排序
     """
     
     # 1. 搜尋篩選
     filtered_stocks = filter_stocks_by_search(ALL_STOCKS, search)
     
-    # 2. 排序
+    # 2. 策略篩選 (如果有的話)
+    if strategy == "first_red_k":
+        # 如果有策略，需要先下載數據才能篩選
+        # 這會比較慢，因為要下載所有候選股票的數據
+        print(f"Applying strategy: {strategy} to {len(filtered_stocks)} stocks")
+        
+        tickers = [s["id"] for s in filtered_stocks]
+        # 這裡必須下載所有數據才能篩選
+        data = download_stock_batch(tickers)
+        
+        strategy_matched_stocks = []
+        
+        for stock_info in filtered_stocks:
+            result = process_stock_data(stock_info, data)
+            if result and result['history']:
+                if check_first_red_k(result['history']):
+                    # 保留原始 info 結構以便後續排序
+                    strategy_matched_stocks.append(stock_info)
+        
+        filtered_stocks = strategy_matched_stocks
+        print(f"Strategy matched: {len(filtered_stocks)} stocks")
+
+    # 3. 排序
     if sort == "symbol":
         filtered_stocks = sorted(
             filtered_stocks, 
@@ -196,13 +262,15 @@ def get_stocks_paginated(
             reverse=(order == "desc")
         )
     
-    # 3. 計算總數
+    # 4. 計算總數
     total = len(filtered_stocks)
     
-    # 4. 分頁切片
+    # 5. 分頁切片
     paginated_stocks = filtered_stocks[offset:offset + limit]
     
-    # 5. 下載股票數據
+    # 6. 下載股票數據 (如果是策略篩選過，其實已經下載過了，但為了架構一致性，這裡再處理一次)
+    # 優化: 如果已經有數據，可以重用，但這裡為了簡單，再次調用 download_stock_batch (會有快取)
+    
     if not paginated_stocks:
         return {
             "total": total,
@@ -214,7 +282,7 @@ def get_stocks_paginated(
     tickers = [s["id"] for s in paginated_stocks]
     data = download_stock_batch(tickers)
     
-    # 6. 處理數據
+    # 7. 處理數據
     results = []
     for stock_info in paginated_stocks:
         result = process_stock_data(stock_info, data)
@@ -231,4 +299,3 @@ def get_stocks_paginated(
 if __name__ == "__main__":
     print(f"Loaded {len(ALL_STOCKS)} Taiwan stocks")
     uvicorn.run(app, host="0.0.0.0", port=8000)
-
