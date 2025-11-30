@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo } from 'react';
-import { Activity, RefreshCw, Filter, ArrowUp, ArrowDown, Search, Zap, AlertTriangle, Loader2, Database } from 'lucide-react';
+import { Activity, RefreshCw, Filter, ArrowUp, ArrowDown, Search, Zap, AlertTriangle, Loader2, Database, TestTube } from 'lucide-react';
 import { StockData, StrategyType } from './types';
 import { fetchStocks, fetchMockStocks, fetchStocksPaginated } from './services/stockService';
 import { checkStrategy } from './services/strategyService';
@@ -15,6 +15,7 @@ export default function App() {
   const [loading, setLoading] = useState<boolean>(true);
   const [error, setError] = useState<string | null>(null);
   const [isDemoMode, setIsDemoMode] = useState<boolean>(false);
+  const [isMockMode, setIsMockMode] = useState<boolean>(false); // New Mock Mode State
 
   // 分頁狀態
   const [usePagination, setUsePagination] = useState<boolean>(true);
@@ -26,15 +27,15 @@ export default function App() {
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [searchInput, setSearchInput] = useState<string>('');
 
-  const loadData = async (useMock: boolean = false, page: number = 0, search: string = '', strategy: StrategyType = StrategyType.ALL) => {
+  const loadData = async (useMock: boolean = false, page: number = 0, search: string = '', strategy: StrategyType = StrategyType.ALL, useBackendMock: boolean = false) => {
     setLoading(true);
     setError(null);
     try {
       let data: StockData[];
       let total = 0;
 
-      if (useMock) {
-        // 模擬模式使用原有邏輯
+      if (useMock && !useBackendMock) {
+        // 前端模擬模式 (舊有邏輯)
         data = await fetchMockStocks();
         setIsDemoMode(true);
         setUsePagination(false);
@@ -48,13 +49,15 @@ export default function App() {
 
       } else if (usePagination) {
         // 分頁模式 (Server-side filtering)
+        // 支援後端模擬數據
         const response = await fetchStocksPaginated({
           offset: page * itemsPerPage,
           limit: itemsPerPage,
           search: search,
           strategy: strategy,
           sort: 'symbol',
-          order: 'asc'
+          order: 'asc',
+          mock: useBackendMock
         });
         data = response.data;
         total = response.total;
@@ -104,14 +107,14 @@ export default function App() {
 
   // Initial Load & Strategy Change
   useEffect(() => {
-    loadData(isDemoMode, currentPage, searchQuery, activeStrategy);
-  }, [currentPage, searchQuery, activeStrategy]);
+    loadData(isDemoMode, currentPage, searchQuery, activeStrategy, isMockMode);
+  }, [currentPage, searchQuery, activeStrategy, isMockMode]);
 
   // Filtering Logic - REMOVED (Now handled by server or loadData)
   // const filteredStocks = ...
 
   const handleRefresh = () => {
-    loadData(isDemoMode, currentPage, searchQuery, activeStrategy);
+    loadData(isDemoMode, currentPage, searchQuery, activeStrategy, isMockMode);
   };
 
   const handleSwitchToDemo = () => {
@@ -119,7 +122,14 @@ export default function App() {
     setSearchQuery('');
     setSearchInput('');
     setActiveStrategy(StrategyType.ALL);
-    loadData(true, 0, '', StrategyType.ALL);
+    loadData(true, 0, '', StrategyType.ALL, false);
+  };
+
+  const handleToggleMockMode = () => {
+    const newMockMode = !isMockMode;
+    setIsMockMode(newMockMode);
+    setCurrentPage(0);
+    // loadData will be triggered by useEffect
   };
 
   const handlePageChange = (page: number) => {
@@ -170,6 +180,16 @@ export default function App() {
                 Last Update: {lastUpdated.toLocaleTimeString()}
               </span>
             )}
+            <button
+              onClick={handleToggleMockMode}
+              className={`flex items-center gap-2 px-3 py-1 text-xs font-bold border rounded transition-all ${isMockMode
+                  ? "bg-purple-900/30 text-purple-400 border-purple-500/30 hover:bg-purple-900/50"
+                  : "bg-slate-800 text-slate-500 border-slate-700 hover:text-slate-300"
+                }`}
+            >
+              <TestTube size={14} />
+              {isMockMode ? "TEST MODE" : "TEST MODE"}
+            </button>
             <button
               onClick={handleRefresh}
               disabled={loading}

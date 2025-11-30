@@ -19,6 +19,7 @@ export interface PaginationParams {
   strategy?: string;
   sort?: 'symbol';
   order?: 'asc' | 'desc';
+  mock?: boolean;
 }
 
 // --- API Fetch ---
@@ -49,7 +50,7 @@ export const fetchStocksPaginated = async (
   params: PaginationParams = {}
 ): Promise<PaginatedResponse> => {
   try {
-    const { offset = 0, limit = 100, search = '', strategy = '', sort = 'symbol', order = 'asc' } = params;
+    const { offset = 0, limit = 100, search = '', strategy = '', sort = 'symbol', order = 'asc', mock = false } = params;
 
     // 構建查詢參數
     const queryParams = new URLSearchParams({
@@ -57,6 +58,7 @@ export const fetchStocksPaginated = async (
       limit: limit.toString(),
       sort,
       order,
+      mock: mock.toString()
     });
 
     // 如果有搜尋關鍵字，加入參數
