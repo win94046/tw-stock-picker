@@ -8,6 +8,7 @@ import yfinance as yf
 import pandas as pd
 from fastapi import FastAPI, Query
 from fastapi.middleware.cors import CORSMiddleware
+import random
 
 app = FastAPI()
 
@@ -89,7 +90,6 @@ def check_first_red_k(history: List[Dict]) -> bool:
     is_strong_red_k = body_pct > 0.02
     
     if not is_strong_red_k:
-        # print(f"Fail Strong Red K: {body_pct:.4f}")
         return False
         
     # 2. 檢查趨勢: 昨天弱勢 (黑K 或 下跌)
@@ -98,7 +98,6 @@ def check_first_red_k(history: List[Dict]) -> bool:
     was_weak_yesterday = yesterday['close'] < yesterday['open'] or yesterday['close'] < prev_day['close']
     
     if not was_weak_yesterday:
-        # print(f"Fail Weak Yesterday")
         return False
         
     # 3. 檢查量能: > 1.5倍 5日均量
@@ -111,10 +110,48 @@ def check_first_red_k(history: List[Dict]) -> bool:
     is_volume_spike = today['volume'] > (avg_volume * 1.5)
     
     if not is_volume_spike:
-        # print(f"Fail Volume Spike: Vol={today['volume']}, Avg={avg_volume}")
         return False
     
     return True
+
+# 策略: 收盤價 > 布林通道上緣
+def calculate_bollinger_bands(history: List[Dict], period: int = 20, multiplier: int = 2) -> Optional[Dict]:
+    """計算布林通道"""
+    if len(history) < period:
+        return None
+        
+    closes = [d['close'] for d in history]
+    # 取最後 period 天
+    recent_closes = closes[-period:]
+    
+    avg = sum(recent_closes) / period
+    
+    variance = sum((x - avg) ** 2 for x in recent_closes) / period
+    std_dev = math.sqrt(variance)
+    
+    upper = avg + (multiplier * std_dev)
+    lower = avg - (multiplier * std_dev)
+    
+    return {
+        "ma20": avg,
+        "upper": upper,
+        "lower": lower
+    }
+
+def check_close_above_upper_band(history: List[Dict]) -> bool:
+    """
+    檢查是否符合「收盤價 > 布林通道上緣」策略
+    """
+    if len(history) < 20:
+        return False
+        
+    today = history[-1]
+    bb = calculate_bollinger_bands(history)
+    
+    if not bb:
+        return False
+        
+    return today['close'] > bb['upper']
 
 # 5. 批次下載股票數據
 def download_stock_batch(symbols: List[str], use_cache: bool = True):
@@ -221,10 +258,6 @@ def get_stocks():
             
     return results
 
-import random
-
-# ... (existing imports)
-
 # 模擬數據生成器
 def generate_mock_data(count: int = 200) -> List[Dict]:
     """生成模擬股票數據，包含符合策略的股票"""
@@ -242,9 +275,14 @@ def generate_mock_data(count: int = 200) -> List[Dict]:
         history = []
         price = 100.0
         
-        # 決定這支股票是否要符合「第一根紅K」策略
-        # 設定前 3 支股票符合策略
-        is_target = i < 3 or 100 < i < 103
+        # 定義策略分組
+        # Group A: MOCK001-005 -> 僅符合「第一根紅K」 (First Red K ONLY)
+        # Group B: MOCK006-010 -> 僅符合「突破布林上緣」 (Upper Band ONLY)
+        # Group C: MOCK011-015 -> 同時符合兩者 (BOTH)
+        
+        is_group_a = 0 <= i < 5
+        is_group_b = 5 <= i < 10
+        is_group_c = 10 <= i < 15
         
         for day in range(60, 0, -1):
             date = (today - timedelta(days=day)).strftime('%Y-%m-%d')
@@ -252,45 +290,88 @@ def generate_mock_data(count: int = 200) -> List[Dict]:
             # 隨機波動
             change = (random.random() - 0.5) * 4
             
-            # 如果是目標股票的最後幾天，強制設定型態
-            if is_target:
-                if day == 1: # 今天: 強勢紅K + 爆量
-                    # 開盤 = 昨收
+            if is_group_a:
+                # Group A: First Red K ONLY
+                # 關鍵：要符合 First Red K，但不能突破布林上緣
+                # 作法：前 20 天波動大 (讓標準差大 -> 布林通道寬)，且股價處於中下軌
+                
+                if day == 1: # 今天: 強勢紅K (3%) + 爆量
                     open_price = price
-                    # 收盤 > 開盤 3%
                     close_price = open_price * 1.03
                     high_price = close_price * 1.01
                     low_price = open_price
-                    # 爆量 (5000張)
                     volume = 5000
-                elif day == 2: # 昨天: 黑K 或 下跌
-                    # 昨收 < 昨開 (黑K)
+                elif day == 2: # 昨天: 黑K (2%)
                     open_price = price
                     close_price = open_price * 0.98
                     high_price = open_price
                     low_price = close_price
                     volume = 1000
-                elif day <= 7: # 前幾天: 量縮整理
+                elif day <= 25: # 前 25 天: 較大波動，但整體往下或持平，確保 MA20 不會太低，但 SD 很大
+                    # 讓價格在 90-110 之間大幅震盪
+                    volatility = (random.random() - 0.5) * 6 # +/- 3
                     open_price = price
-                    close_price = price * (1 + (random.random() - 0.5) * 0.02)
-                    high_price = max(open_price, close_price)
-                    low_price = min(open_price, close_price)
-                    volume = 1000 # 均量約 1000
-                elif 100 < day < 103:
-                    # 開盤 = 昨收
+                    close_price = price + volatility
+                    high_price = max(open_price, close_price) + 1
+                    low_price = min(open_price, close_price) - 1
+                    volume = random.randint(1000, 3000)
+                else:
+                    # 更早之前
                     open_price = price
-                    # 收盤 > 開盤 3%
-                    close_price = open_price * 1.03
+                    close_price = price + change
+                    high_price = max(open_price, close_price) + random.random()
+                    low_price = min(open_price, close_price) - random.random()
+                    volume = random.randint(500, 2000)
+                    
+            elif is_group_b:
+                # Group B: Upper Band ONLY
+                # 關鍵：突破上緣，但不是 First Red K
+                # 作法：連漲三天 (破壞 First Red K 的「昨日弱勢」條件)
+                
+                if day <= 3: # 最近三天連漲
+                    open_price = price
+                    close_price = price * 1.05 # 漲 5%
                     high_price = close_price * 1.01
                     low_price = open_price
-                    # 爆量 (5000張)
-                    volume = 5000
+                    volume = 3000
+                else:
+                    # 平穩波動，讓通道收縮，容易突破
+                    open_price = price
+                    close_price = price + (random.random() - 0.5) * 1
+                    high_price = max(open_price, close_price) + 0.5
+                    low_price = min(open_price, close_price) - 0.5
+                    volume = random.randint(500, 1500)
+                    
+            elif is_group_c:
+                # Group C: BOTH
+                # 關鍵：First Red K 且 突破上緣
+                # 作法：前 20 天極度平穩 (通道窄)，然後突然 First Red K 噴出
+                
+                if day == 1: # 今天: 強勢紅K (4%) -> 容易突破窄通道
+                    open_price = price
+                    close_price = open_price * 1.04
+                    high_price = close_price * 1.01
+                    low_price = open_price
+                    volume = 6000
+                elif day == 2: # 昨天: 小黑K (1%) -> 符合昨日弱勢，且不破壞通道太嚴重
+                    open_price = price
+                    close_price = open_price * 0.99
+                    high_price = open_price
+                    low_price = close_price
+                    volume = 800
+                elif day <= 30: # 前 30 天: 死魚盤 (極低波動)
+                    open_price = price
+                    close_price = price + (random.random() - 0.5) * 0.2 # +/- 0.1
+                    high_price = max(open_price, close_price) + 0.1
+                    low_price = min(open_price, close_price) - 0.1
+                    volume = random.randint(200, 500)
                 else:
                     open_price = price
                     close_price = price + change
                     high_price = max(open_price, close_price) + random.random()
                     low_price = min(open_price, close_price) - random.random()
                     volume = random.randint(500, 2000)
+                    
             else:
                 # 一般隨機股票
                 open_price = price
@@ -326,15 +407,13 @@ def generate_mock_data(count: int = 200) -> List[Dict]:
         
     return mock_stocks
 
-# ... (existing code)
-
 # 8. 新的分頁端點
 @app.get("/api/stocks/paginated")
 def get_stocks_paginated(
     offset: int = Query(0, ge=0, description="起始位置"),
     limit: int = Query(100, ge=1, le=200, description="每頁數量"),
     search: Optional[str] = Query(None, description="搜尋股票代碼"),
-    strategy: Optional[str] = Query(None, description="策略篩選 (例如: first_red_k)"),
+    strategy: Optional[str] = Query(None, description="策略篩選 (例如: first_red_k,close_above_upper)"),
     sort: str = Query("symbol", description="排序方式"),
     order: str = Query("asc", description="排序順序 (asc/desc)"),
     mock: bool = Query(False, description="是否使用模擬數據")
@@ -347,89 +426,66 @@ def get_stocks_paginated(
     if mock:
         # 使用模擬數據 (已經包含完整 history)
         source_stocks = generate_mock_data(200)
-        # 模擬數據不需要 filter_stocks_by_search 的 id 結構，但為了共用邏輯...
-        # 這裡直接在 generate_mock_data 裡回傳完整結構
-    else:
-        source_stocks = ALL_STOCKS
-
-    # 1. 搜尋篩選
-    if mock:
-        # 針對模擬數據的搜尋
+        filtered_stocks = source_stocks
+        
+        # 搜尋
         if search:
-            search = search.upper()
-            filtered_stocks = [s for s in source_stocks if search in s["symbol"] or search in s["name"]]
-        else:
-            filtered_stocks = source_stocks
-    else:
-        filtered_stocks = filter_stocks_by_search(source_stocks, search)
-    
-    # 2. 策略篩選
-    if strategy == "first_red_k":
-        print(f"Applying strategy: {strategy} to {len(filtered_stocks)} stocks (Mock: {mock})")
-        
-        strategy_matched_stocks = []
-        
-        if mock:
-            # 模擬數據已經有 history，直接篩選
-            for stock in filtered_stocks:
-                if check_first_red_k(stock['history']):
-                    strategy_matched_stocks.append(stock)
-        else:
-            # 真實數據需要下載
-            tickers = [s["id"] for s in filtered_stocks]
-            data = download_stock_batch(tickers)
+            search = search.strip().upper()
+            filtered_stocks = [s for s in filtered_stocks if search in s["symbol"] or search in s["name"]]
             
-            for stock_info in filtered_stocks:
-                result = process_stock_data(stock_info, data)
-                if result and result['history']:
-                    if check_first_red_k(result['history']):
-                        strategy_matched_stocks.append(stock_info)
-        
-        filtered_stocks = strategy_matched_stocks
-        print(f"Strategy matched: {len(filtered_stocks)} stocks")
-
-    # 3. 排序
-    if sort == "symbol":
-        filtered_stocks = sorted(
-            filtered_stocks, 
-            key=lambda x: x["symbol"] if mock else x["id"], 
-            reverse=(order == "desc")
-        )
-    
-    # 4. 計算總數
-    total = len(filtered_stocks)
-    
-    # 5. 分頁切片
-    paginated_stocks = filtered_stocks[offset:offset + limit]
-    
-    # 6. 準備回傳數據
-    if mock:
-        # 模擬數據已經是完整格式
-        results = paginated_stocks
     else:
-        # 真實數據需要下載和處理 (如果還沒做過)
-        if not paginated_stocks:
-             return {
-                "total": total,
-                "offset": offset,
-                "limit": limit,
-                "data": []
-            }
+        # 使用真實數據
+        # 1. 先搜尋 (減少需要下載的股票數量)
+        target_stocks = ALL_STOCKS
+        if search:
+            target_stocks = filter_stocks_by_search(ALL_STOCKS, search)
             
-        tickers = [s["id"] for s in paginated_stocks]
-        data = download_stock_batch(tickers)
+        # 2. 下載數據
+        tickers = [s["id"] for s in target_stocks]
+        # 如果沒有搜尋，只下載前 100 檔 (避免太久)
+        # 除非有指定策略，那就要全市場掃描 (這裡先限制 200 檔以示範，實際應全掃)
+        if not search and not strategy:
+            tickers = tickers[:200]
+            target_stocks = target_stocks[:200]
+            
+        raw_data = download_stock_batch(tickers)
         
-        results = []
-        for stock_info in paginated_stocks:
-            result = process_stock_data(stock_info, data)
+        # 3. 處理數據
+        filtered_stocks = []
+        for stock_info in target_stocks:
+            result = process_stock_data(stock_info, raw_data)
             if result:
-                results.append(result)
+                filtered_stocks.append(result)
+
+    # 4. 策略篩選 (支援多選，AND 邏輯)
+    if strategy:
+        strategies = strategy.split(',')
+        
+        for strat in strategies:
+            strat = strat.strip()
+            if strat == "first_red_k":
+                filtered_stocks = [s for s in filtered_stocks if check_first_red_k(s["history"])]
+            elif strat == "close_above_upper":
+                filtered_stocks = [s for s in filtered_stocks if check_close_above_upper_band(s["history"])]
+                
+    # 5. 排序
+    reverse = (order == "desc")
+    if sort == "symbol":
+        filtered_stocks.sort(key=lambda x: x["symbol"], reverse=reverse)
+    elif sort == "price":
+        filtered_stocks.sort(key=lambda x: x["currentPrice"], reverse=reverse)
+    elif sort == "change":
+        filtered_stocks.sort(key=lambda x: x["changePct"], reverse=reverse)
+        
+    # 6. 分頁
+    total = len(filtered_stocks)
+    paginated_data = filtered_stocks[offset : offset + limit]
     
     return {
         "total": total,
         "offset": offset,
         "limit": limit,
-        "data": results
+        "data": paginated_data
     }
 
 if __name__ == "__main__":

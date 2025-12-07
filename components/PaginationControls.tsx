@@ -8,6 +8,7 @@ interface PaginationControlsProps {
     totalItems: number;
     itemsPerPage: number;
     displayedItems: number;
+    loading?: boolean;
 }
 
 export default function PaginationControls({
@@ -16,7 +17,8 @@ export default function PaginationControls({
     onPageChange,
     totalItems,
     itemsPerPage,
-    displayedItems
+    displayedItems,
+    loading = false
 }: PaginationControlsProps) {
     const startItem = currentPage * itemsPerPage + 1;
     const endItem = Math.min((currentPage + 1) * itemsPerPage, totalItems);
@@ -113,8 +115,8 @@ export default function PaginationControls({
                                 <button
                                     onClick={() => onPageChange(page as number)}
                                     className={`px-3 py-1.5 text-sm rounded-lg border transition-all ${currentPage === page
-                                            ? 'bg-blue-600 text-white border-blue-500 shadow-lg shadow-blue-900/40'
-                                            : 'bg-slate-800 text-slate-400 border-slate-700 hover:bg-slate-700 hover:text-white'
+                                        ? 'bg-blue-600 text-white border-blue-500 shadow-lg shadow-blue-900/40'
+                                        : 'bg-slate-800 text-slate-400 border-slate-700 hover:bg-slate-700 hover:text-white'
                                         }`}
                                 >
                                     {(page as number) + 1}
