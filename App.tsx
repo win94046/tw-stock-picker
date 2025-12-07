@@ -200,6 +200,17 @@ export default function App() {
               <TrendingUp className="w-3 h-3" />
               突破布林上緣
             </button>
+
+            <button
+              onClick={() => toggleStrategy('6ma_kd_macd')}
+              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium transition-all border ${selectedStrategies.includes('6ma_kd_macd')
+                ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/50 shadow-[0_0_10px_rgba(16,185,129,0.2)]'
+                : 'bg-slate-800 text-slate-400 border-slate-700 hover:border-slate-600'
+                }`}
+            >
+              <Activity className="w-3 h-3" />
+              六線+雙指標
+            </button>
           </div>
 
           {/* Active Filters Display */}
@@ -241,8 +252,9 @@ export default function App() {
           ) : (
             <StockList
               stocks={stocks}
-              selectedStock={selectedStock}
-              onSelectStock={setSelectedStock}
+              selectedId={selectedStock?.symbol}
+              onSelect={setSelectedStock}
+              isFiltered={selectedStrategies.length > 0}
             />
           )}
         </div>

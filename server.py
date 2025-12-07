@@ -138,6 +138,88 @@ def calculate_bollinger_bands(history: List[Dict], period: int = 20, multiplier:
         "lower": lower
     }
 
+# 策略: 六線+雙指標 (6MA + KD + MACD)
+def calculate_technical_indicators(df: pd.DataFrame) -> pd.DataFrame:
+    """計算技術指標：6MA, KD, MACD"""
+    # 1. 計算 6 條均線
+    for ma in [5, 10, 20, 60, 120, 240]:
+        df[f'MA{ma}'] = df['Close'].rolling(window=ma).mean()
+        
+    # 2. 計算 KD (9, 3, 3)
+    # RSV = (Close - Lowest Low_9) / (Highest High_9 - Lowest Low_9) * 100
+    low_min = df['Low'].rolling(window=9).min()
+    high_max = df['High'].rolling(window=9).max()
+    
+    # 避免除以零
+    rsv = (df['Close'] - low_min) / (high_max - low_min) * 100
+    rsv = rsv.fillna(50) # 填補 NaN
+    
+    # K = 2/3 * Prev_K + 1/3 * RSV
+    # D = 2/3 * Prev_D + 1/3 * K
+    # 使用 pandas ewm (Exponential Weighted Moving Average) 模擬遞迴計算
+    # alpha=1/3 對應 com=2
+    df['K'] = rsv.ewm(com=2, adjust=False).mean()
+    df['D'] = df['K'].ewm(com=2, adjust=False).mean()
+    
+    # 3. 計算 MACD (12, 26, 9)
+    # EMA12, EMA26
+    ema12 = df['Close'].ewm(span=12, adjust=False).mean()
+    ema26 = df['Close'].ewm(span=26, adjust=False).mean()
+    
+    df['DIF'] = ema12 - ema26
+    df['MACD'] = df['DIF'].ewm(span=9, adjust=False).mean() # Signal line
+    df['OSC'] = df['DIF'] - df['MACD'] # 柱狀圖
+    
+    return df
+
+def check_6ma_kd_macd(history: List[Dict]) -> bool:
+    """
+    檢查是否符合「站上六均線 + KD 黃金交叉 + MACD 轉正」
+    需使用 pandas 計算較複雜指標
+    """
+    if len(history) < 240: # 至少需要一年資料算年線
+        return False
+        
+    # 轉換為 DataFrame 以利計算
+    df = pd.DataFrame(history)
+    # 確保欄位名稱正確 (yfinance 下載的可能是小寫)
+    df.rename(columns={'open': 'Open', 'high': 'High', 'low': 'Low', 'close': 'Close', 'volume': 'Volume'}, inplace=True)
+    
+    # 計算指標
+    df = calculate_technical_indicators(df)
+    
+    # 取得最後一天與前一天
+    today = df.iloc[-1]
+    prev = df.iloc[-2]
+    
+    # 1. 站上六均線: 收盤價 > 所有均線
+    mas = ['MA5', 'MA10', 'MA20', 'MA60', 'MA120', 'MA240']
+    # 檢查是否所有 MA 都有值 (非 NaN)
+    if today[mas].isnull().any():
+        return False
+        
+    is_above_all_ma = all(today['Close'] > today[ma] for ma in mas)
+    
+    if not is_above_all_ma:
+        return False
+        
+    # 2. KD 黃金交叉: K > D 且 昨日 K <= 昨日 D
+    # 寬鬆判定：K > D 即可，或者嚴格判定今日交叉
+    # 這裡採用：今日 K > D 且 (昨日 K <= 昨日 D 或 K, D 剛好在低檔向上)
+    # 為了簡化且符合常見定義：今日 K > D 且 昨日 K <= 昨日 D
+    is_kd_golden_cross = (today['K'] > today['D']) and (prev['K'] <= prev['D'])
+    
+    if not is_kd_golden_cross:
+        return False
+        
+    # 3. MACD 轉正: OSC > 0
+    is_macd_positive = today['OSC'] > 0
+    
+    if not is_macd_positive:
+        return False
+        
+    return True
+
 def check_close_above_upper_band(history: List[Dict]) -> bool:
     """
     檢查是否符合「收盤價 > 布林通道上緣」策略
@@ -168,7 +250,8 @@ def download_stock_batch(symbols: List[str], use_cache: bool = True):
     # 下載數據
     print(f"Downloading data for {len(symbols)} stocks...")
     try:
-        data = yf.download(symbols, period="3mo", group_by='ticker', threads=True)
+        # 修改為 2 年數據以計算年線
+        data = yf.download(symbols, period="2y", group_by='ticker', threads=True)
         
         # 更新快取
         _cache[cache_key] = data
@@ -199,6 +282,9 @@ def process_stock_data(stock_info: Dict, data) -> Optional[Dict]:
         # 處理 NaN
         df = df.ffill().bfill()
         
+        # 計算技術指標
+        df = calculate_technical_indicators(df)
+        
         # 轉換歷史數據
         history = []
         for index, row in df.iterrows():
@@ -207,14 +293,27 @@ def process_stock_data(stock_info: Dict, data) -> Optional[Dict]:
                 if pd.isna(row['Open']) or pd.isna(row['Close']):
                     continue
                     
-                history.append({
+                record = {
                     "date": index.strftime('%Y-%m-%d'),
                     "open": float(row['Open']),
                     "high": float(row['High']),
                     "low": float(row['Low']),
                     "close": float(row['Close']),
-                    "volume": int(row['Volume'])
-                })
+                    "volume": int(row['Volume']),
+                    # 技術指標 (處理 NaN)
+                    "ma5": float(row['MA5']) if not pd.isna(row['MA5']) else None,
+                    "ma10": float(row['MA10']) if not pd.isna(row['MA10']) else None,
+                    "ma20": float(row['MA20']) if not pd.isna(row['MA20']) else None,
+                    "ma60": float(row['MA60']) if not pd.isna(row['MA60']) else None,
+                    "ma120": float(row['MA120']) if not pd.isna(row['MA120']) else None,
+                    "ma240": float(row['MA240']) if not pd.isna(row['MA240']) else None,
+                    "k": float(row['K']) if not pd.isna(row['K']) else None,
+                    "d": float(row['D']) if not pd.isna(row['D']) else None,
+                    "dif": float(row['DIF']) if not pd.isna(row['DIF']) else None,
+                    "macd": float(row['MACD']) if not pd.isna(row['MACD']) else None,
+                    "osc": float(row['OSC']) if not pd.isna(row['OSC']) else None,
+                }
+                history.append(record)
             except Exception as e:
                 continue
                 
@@ -279,18 +378,49 @@ def generate_mock_data(count: int = 200) -> List[Dict]:
         # Group A: MOCK001-005 -> 僅符合「第一根紅K」 (First Red K ONLY)
         # Group B: MOCK006-010 -> 僅符合「突破布林上緣」 (Upper Band ONLY)
         # Group C: MOCK011-015 -> 同時符合兩者 (BOTH)
+        # Group D: MOCK016-020 -> 符合「六線+雙指標」 (Perfect Stock)
         
         is_group_a = 0 <= i < 5
         is_group_b = 5 <= i < 10
         is_group_c = 10 <= i < 15
+        is_group_d = 15 <= i < 20
         
-        for day in range(60, 0, -1):
+        for day in range(300, 0, -1):
             date = (today - timedelta(days=day)).strftime('%Y-%m-%d')
             
             # 隨機波動
             change = (random.random() - 0.5) * 4
             
-            if is_group_a:
+            if is_group_d:
+                # Group D: Perfect Stock (6MA + KD + MACD)
+                # 需要長期多頭排列 (MA240 < MA120 < ... < Price)
+                # 且今日 KD 黃金交叉，MACD 正向
+                
+                # 1. 長期趨勢向上 (每天微漲)
+                trend = 0.2 # 每天漲 0.2%
+                
+                # 2. 近期回檔修正 (讓 K < D)
+                # 修正幅度減小，避免跌破 MA20 太多
+                if 15 >= day > 2:
+                    trend = -0.1 # 緩跌
+                
+                # 3. 昨日止穩 (K <= D)
+                if day == 2:
+                    trend = 0.0
+                    
+                # 4. 今日噴出 (K > D, MACD > 0)
+                if day == 1:
+                    trend = 5.0 # 大漲
+                    
+                price = price * (1 + (trend + (random.random()-0.5)*0.2)/100)
+                
+                open_price = price
+                close_price = price * (1 + trend/100)
+                high_price = max(open_price, close_price) * 1.01
+                low_price = min(open_price, close_price) * 0.99
+                volume = 2000
+                
+            elif is_group_a:
                 # Group A: First Red K ONLY
                 # 關鍵：要符合 First Red K，但不能突破布林上緣
                 # 作法：前 20 天波動大 (讓標準差大 -> 布林通道寬)，且股價處於中下軌
@@ -444,7 +574,10 @@ def get_stocks_paginated(
         tickers = [s["id"] for s in target_stocks]
         # 如果沒有搜尋，只下載前 100 檔 (避免太久)
         # 除非有指定策略，那就要全市場掃描 (這裡先限制 200 檔以示範，實際應全掃)
-        if not search and not strategy:
+        # 如果沒有搜尋，只下載前 100 檔 (避免太久)
+        # 除非有指定策略，那就要全市場掃描 (這裡先限制 200 檔以示範，實際應全掃)
+        # 為了避免 timeout，暫時將策略篩選也限制在 200 檔
+        if not search:
             tickers = tickers[:200]
             target_stocks = target_stocks[:200]
             
@@ -467,6 +600,8 @@ def get_stocks_paginated(
                 filtered_stocks = [s for s in filtered_stocks if check_first_red_k(s["history"])]
             elif strat == "close_above_upper":
                 filtered_stocks = [s for s in filtered_stocks if check_close_above_upper_band(s["history"])]
+            elif strat == "6ma_kd_macd":
+                filtered_stocks = [s for s in filtered_stocks if check_6ma_kd_macd(s["history"])]
                 
     # 5. 排序
     reverse = (order == "desc")
